@@ -40,6 +40,9 @@
 #include <ldap.h>
 #include <sys/un.h>
 #include <hex.h>
+// FIXME, no declaration of strptime
+// #include <time.h>
+extern char *strptime(const char *, const char *, struct tm *);
 
 static krb5_error_code LDAP__connect(krb5_context context, HDB *);
 static krb5_error_code LDAP_close(krb5_context context, HDB *);
@@ -1532,13 +1535,16 @@ static krb5_error_code
 LDAP__connect(krb5_context context, HDB * db)
 {
     int rc, version = LDAP_VERSION3;
-    /*
-     * Empty credentials to do a SASL bind with LDAP. Note that empty
-     * different from NULL credentials. If you provide NULL
-     * credentials instead of empty credentials you will get a SASL
-     * bind in progress message.
-     */
-    struct berval bv = { 0, "" };
+    const char *bind_dn, *bind_secret;
+    bool use_tls;
+
+    bind_dn = krb5_config_get_string(context, NULL, "kdc",
+                                   "hdb-ldap-bind-dn", NULL);
+    bind_secret = krb5_config_get_string(context, NULL, "kdc",
+				   "hdb-ldap-bind-secret", NULL);
+    use_tls = krb5_config_get_bool_default(context, NULL, FALSE,
+				   "kdc", "hdb-ldap-start-tls", NULL);
+
 
     if (HDB2LDAP(db)) {
 	/* connection has been opened. ping server. */
@@ -1556,6 +1562,7 @@ LDAP__connect(krb5_context context, HDB * db)
     if (HDB2LDAP(db) != NULL) /* server is UP */
 	return 0;
 
+
     rc = ldap_initialize(&((struct hdbldapdb *)db->hdb_db)->h_lp, HDB2URL(db));
     if (rc != LDAP_SUCCESS) {
 	krb5_set_error_message(context, HDB_ERR_NOENTRY, "ldap_initialize: %s",
@@ -1572,15 +1579,70 @@ LDAP__connect(krb5_context context, HDB * db)
 	return HDB_ERR_BADVERSION;
     }
 
-    rc = ldap_sasl_bind_s(HDB2LDAP(db), NULL, "EXTERNAL", &bv,
-			  NULL, NULL, NULL);
-    if (rc != LDAP_SUCCESS) {
-	krb5_set_error_message(context, HDB_ERR_BADVERSION,
-			      "ldap_sasl_bind_s: %s", ldap_err2string(rc));
-	LDAP_close(context, db);
-	return HDB_ERR_BADVERSION;
-    }
+    if(bind_dn != NULL) {
+    /* if there is a bind dn do a simple bind */
 
+	if(strncmp(HDB2URL(db), "ldaps", 5) == 0) {
+	/* when using a ldaps:// url set the tls flag for the connection */
+#ifdef LDAP_OPT_X_TLS
+			int tls = LDAP_OPT_X_TLS_HARD;
+			if (ldap_set_option (HDB2LDAP(db), LDAP_OPT_X_TLS, &tls) != LDAP_SUCCESS) {
+				krb5_set_error_message(context, HDB_ERR_BADVERSION,
+							      "ldap_set_option: %s", ldap_err2string(rc));
+				LDAP_close(context, db);
+				return HDB_ERR_BADVERSION;
+			}
+#else
+		krb5_set_error_message(context, HDB_ERR_LDAP_TLS,
+						      "ldap_start_tls_s: TLS not supported by LDAP client libraries");
+		LDAP_close(context, db);
+		return HDB_ERR_LDAP_TLS;
+#endif /* LDAP_OPT_X_TLS */
+
+	} else if(use_tls == TRUE) {
+	/* if not using a ldaps:// url use start-tls if enabled in config */
+#ifdef LDAP_OPT_X_TLS
+		if ((rc = ldap_start_tls_s (HDB2LDAP(db), NULL, NULL)) != LDAP_SUCCESS)	{
+			krb5_set_error_message(context, HDB_ERR_LDAP_TLS,
+						      "ldap_start_tls_s: %s", ldap_err2string(rc));
+			LDAP_close(context, db);
+			return HDB_ERR_LDAP_TLS;
+		}
+#else
+		krb5_set_error_message(context, HDB_ERR_LDAP_TLS,
+						      "ldap_start_tls_s: TLS not supported by LDAP client libraries");
+		LDAP_close(context, db);
+		return HDB_ERR_LDAP_TLS;
+#endif /* LDAP_OPT_X_TLS */
+	}
+
+	/* do the bind */
+	if((rc = ldap_simple_bind_s(HDB2LDAP(db), bind_dn, bind_secret == NULL ? "" : bind_secret)) != LDAP_SUCCESS) {
+		krb5_set_error_message(context, HDB_ERR_LDAP_BIND,
+					      "ldap_simple_bind_s: %s", ldap_err2string(rc));
+		LDAP_close(context, db);
+		return HDB_ERR_LDAP_BIND;
+	}
+
+    } else {
+        /* if no bind dn is set continue as usual with a sasl bind */
+        /*
+	* Empty credentials to do a SASL bind with LDAP. Note that empty
+	* different from NULL credentials. If you provide NULL
+	* credentials instead of empty credentials you will get a SASL
+	* bind in progress message.
+	*/
+	struct berval bv = { 0, "" };
+
+	rc = ldap_sasl_bind_s(HDB2LDAP(db), NULL, "EXTERNAL", &bv,
+			  NULL, NULL, NULL);
+	if (rc != LDAP_SUCCESS) {
+		krb5_set_error_message(context, HDB_ERR_LDAP_BIND,
+				      "ldap_sasl_bind_s: %s", ldap_err2string(rc));
+		LDAP_close(context, db);
+		return HDB_ERR_LDAP_BIND;
+	}
+    }
     return 0;
 }
 
@@ -1897,7 +1959,11 @@ hdb_ldap_common(krb5_context context,
 krb5_error_code
 hdb_ldap_create(krb5_context context, HDB ** db, const char *arg)
 {
-    return hdb_ldap_common(context, db, arg, "ldapi:///");
+    const char *url;
+    url = krb5_config_get_string_default(context, NULL, "ldapi:///",
+						"kdc", "hdb-ldap-url", NULL);
+
+    return hdb_ldap_common(context, db, arg, url);
 }
 
 krb5_error_code

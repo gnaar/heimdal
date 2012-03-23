@@ -600,6 +600,19 @@ boolean value if the 524 daemon should return AFS 2b tokens for
 .It ...
 .El
 .It Li }
+.It Li hdb-ldap-url Va url
+The url of the ldap server, for example ldap://localhost .
+Defaults to ldapi:/// .
+.It Li hdb-ldap-bind-dn Va bind-dn
+The dn used to bind to the ldap server.
+If this options is set heimdal will not use sasl authentication,
+but a simple bind to connect to the ldap server.
+.It Li hdb-ldap-bind-secret Va bind-secret
+The password used to bind to the ldap server.
+.It Li hdb-ldap-start-tls Va BOOL
+Use StartTLS to encrypt traffic to the ldap server.
+When an ldaps:// url is used in hdb-ldap-url this option is not necessary.
+Defaults to false.
 .It Li hdb-ldap-structural-object Va structural object
 If the LDAP backend is used for storing principals, this is the
 structural object that will be used when creating and when reading
